@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -10,35 +9,56 @@ import pandas as pd
 @dataclass(frozen=True)
 class ORBConfig:
     opening_bars: int = 3
-    confirmation_closes: int = 2
-    max_gap_pct: float | None = 0.50
+    confirmation_closes: int = 4
+    max_gap_pct: float | None = None
     stop_pct: float = 0.60
-    target_r: float = 2.0
-    entry_start: str = "09:35"
+    target_r: float = 3.0
+    entry_start: str = "09:30"
     last_entry: str = "11:00"
     exit_time: str = "15:25"
+    worst_case_ambiguous_bar: bool = True
+
+
+def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    aliases = {
+        "datetime": "Datetime",
+        "date": "Date",
+        "time": "Time",
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+    }
+    out = df.copy()
+    out.columns = [str(c).strip() for c in out.columns]
+    rename = {}
+    for c in out.columns:
+        key = c.lower()
+        if key in aliases:
+            rename[c] = aliases[key]
+    out = out.rename(columns=rename)
+    required = {"Datetime", "Open", "High", "Low", "Close"}
+    missing = required - set(out.columns)
+    if missing:
+        raise ValueError(f"Missing columns: {sorted(missing)}")
+    return out
 
 
 def prepare_sessions(df: pd.DataFrame) -> pd.DataFrame:
-    """Validate and enrich 5-minute NIFTY OHLC data without look-ahead."""
-    required = {"Date", "Time", "Open", "High", "Low", "Close"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError(f"Missing columns: {sorted(missing)}")
-
-    out = df.copy()
-    out["DateTime"] = pd.to_datetime(
-        out["Date"].astype(str) + " " + out["Time"].astype(str),
-        errors="coerce",
-    )
+    """Validate/enrich regular-session NIFTY 5-minute data."""
+    out = _normalize_columns(df)
+    if "Datetime" in out.columns:
+        out["DateTime"] = pd.to_datetime(out["Datetime"], errors="coerce")
+    else:
+        out["DateTime"] = pd.to_datetime(
+            out["Date"].astype(str) + " " + out["Time"].astype(str),
+            errors="coerce",
+        )
     out = out.dropna(subset=["DateTime"]).sort_values("DateTime")
     out = out.set_index("DateTime")
-
     out = out.between_time("09:15", "15:25").copy()
     out["SessionDate"] = out.index.date
-
-    sessions = out.groupby("SessionDate", sort=True)
-    sizes = sessions.size()
+    sizes = out.groupby("SessionDate", sort=True).size()
     complete = sizes[sizes == 75].index
     out = out[out["SessionDate"].isin(complete)].copy()
 
@@ -50,111 +70,111 @@ def prepare_sessions(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def _entry_side(day: pd.DataFrame, cfg: ORBConfig) -> tuple[int, float] | None:
-    """Return (direction, entry_price) or None. Direction is +1 long, -1 short."""
-    or_high = day["High"].iloc[: cfg.opening_bars].max()
-    or_low = day["Low"].iloc[: cfg.opening_bars].min()
-    post = day.iloc[cfg.opening_bars:]
-    post = post.between_time(cfg.entry_start, cfg.last_entry)
+def _find_entry(day: pd.DataFrame, cfg: ORBConfig) -> tuple[int, int, float] | None:
+    """Return (row index, direction, entry price) using only completed confirmation candles."""
+    or_high = float(day["High"].iloc[: cfg.opening_bars].max())
+    or_low = float(day["Low"].iloc[: cfg.opening_bars].min())
+    up_count = down_count = 0
+    start = pd.Timestamp(cfg.entry_start).time()
+    last = pd.Timestamp(cfg.last_entry).time()
 
-    up_count = 0
-    down_count = 0
-    for _, row in post.iterrows():
-        if row["Close"] > or_high:
+    for i in range(cfg.opening_bars, len(day)):
+        tm = day.index[i].time()
+        if tm < start:
+            continue
+        if tm > last:
+            break
+        close = float(day["Close"].iloc[i])
+        if close > or_high:
             up_count += 1
             down_count = 0
-        elif row["Close"] < or_low:
+        elif close < or_low:
             down_count += 1
             up_count = 0
         else:
-            up_count = 0
-            down_count = 0
-
+            up_count = down_count = 0
         if up_count >= cfg.confirmation_closes:
-            return 1, float(row["Close"])
+            return i, 1, close
         if down_count >= cfg.confirmation_closes:
-            return -1, float(row["Close"])
+            return i, -1, close
     return None
 
 
-def backtest(df: pd.DataFrame, cfg: ORBConfig) -> pd.DataFrame:
-    """Backtest one-trade-per-day ORB with OHLC execution assumptions.
+def backtest(df: pd.DataFrame, cfg: ORBConfig = ORBConfig()) -> pd.DataFrame:
+    """One-trade-per-session ORB.
 
-    Entry occurs at the close of the confirmation candle. Within each subsequent
-    candle, stop is assumed to trigger before target when both are touched.
-    Remaining position is exited at 15:25 close. Returns are measured in R.
+    Entry is at the confirmation candle close. Stop/target are evaluated only on
+    subsequent candles. When both are touched in one candle, worst-case SL first
+    is used by default because OHLC data cannot resolve intrabar ordering.
     """
-    df = prepare_sessions(df)
+    data = prepare_sessions(df)
     trades: list[dict] = []
 
-    for session_date, day in df.groupby("SessionDate", sort=True):
+    for session_date, day in data.groupby("SessionDate", sort=True):
         gap = float(day["GapPct"].iloc[0])
+        if pd.isna(gap):
+            continue
         if cfg.max_gap_pct is not None and abs(gap) >= cfg.max_gap_pct:
             continue
-
-        side_entry = _entry_side(day, cfg)
-        if side_entry is None:
+        found = _find_entry(day, cfg)
+        if found is None:
             continue
-
-        direction, entry = side_entry
+        entry_idx, direction, entry = found
         risk = entry * cfg.stop_pct / 100.0
         stop = entry - direction * risk
         target = entry + direction * risk * cfg.target_r
 
-        # Find first post-entry exit. Entry is at a bar close, so only later bars count.
-        ts = day.index
-        entry_idx = next(i for i, t in enumerate(ts) if day.iloc[i]["Close"] == entry and t.time().strftime("%H:%M") >= cfg.entry_start)
-        exit_price = float(day.iloc[-1]["Close"])
-        exit_reason = "EOD"
-        exit_ts = day.index[-1]
-
+        exit_idx = len(day) - 1
+        exit_price = float(day["Close"].iloc[-1])
+        reason = "EOD"
         for i in range(entry_idx + 1, len(day)):
-            row = day.iloc[i]
-            hit_stop = row["Low"] <= stop if direction == 1 else row["High"] >= stop
-            hit_target = row["High"] >= target if direction == 1 else row["Low"] <= target
+            hi = float(day["High"].iloc[i])
+            lo = float(day["Low"].iloc[i])
+            hit_stop = lo <= stop if direction == 1 else hi >= stop
+            hit_target = hi >= target if direction == 1 else lo <= target
+            if hit_stop and hit_target:
+                exit_idx = i
+                exit_price = stop if cfg.worst_case_ambiguous_bar else target
+                reason = "SL_AMBIGUOUS" if cfg.worst_case_ambiguous_bar else "TP_AMBIGUOUS"
+                break
             if hit_stop:
-                exit_price = stop
-                exit_reason = "SL"
-                exit_ts = day.index[i]
+                exit_idx, exit_price, reason = i, stop, "SL"
                 break
             if hit_target:
-                exit_price = target
-                exit_reason = "TP"
-                exit_ts = day.index[i]
+                exit_idx, exit_price, reason = i, target, "TP"
                 break
 
-        r = direction * (exit_price - entry) / risk
+        r_multiple = direction * (exit_price - entry) / risk
         trades.append(
             {
                 "SessionDate": session_date,
                 "EntryTime": day.index[entry_idx],
-                "ExitTime": exit_ts,
+                "ExitTime": day.index[exit_idx],
                 "Direction": direction,
                 "GapPct": gap,
                 "Entry": entry,
                 "Exit": exit_price,
                 "Stop": stop,
                 "Target": target,
-                "ExitReason": exit_reason,
-                "R": r,
+                "ExitReason": reason,
+                "R": r_multiple,
             }
         )
-
     return pd.DataFrame(trades)
 
 
-def summarize(trades: pd.DataFrame) -> dict:
+def summarize(trades: pd.DataFrame) -> dict[str, float]:
     if trades.empty:
-        return {"trades": 0, "win_rate": np.nan, "profit_factor": np.nan, "avg_R": np.nan, "max_drawdown_R": np.nan}
+        return {"trades": 0, "win_rate": np.nan, "profit_factor": np.nan, "avg_R": np.nan, "max_drawdown_R": np.nan, "total_R": 0.0}
     r = trades["R"].astype(float)
     equity = r.cumsum()
     dd = equity - equity.cummax()
-    gross_profit = r[r > 0].sum()
-    gross_loss = -r[r < 0].sum()
+    gains = r[r > 0].sum()
+    losses = -r[r < 0].sum()
     return {
         "trades": int(len(r)),
         "win_rate": float((r > 0).mean()),
-        "profit_factor": float(gross_profit / gross_loss) if gross_loss else np.inf,
+        "profit_factor": float(gains / losses) if losses else np.inf,
         "avg_R": float(r.mean()),
         "max_drawdown_R": float(dd.min()),
         "total_R": float(r.sum()),
@@ -162,4 +182,4 @@ def summarize(trades: pd.DataFrame) -> dict:
 
 
 if __name__ == "__main__":
-    raise SystemExit("Import the module and supply the local NIFTY OHLC dataset.")
+    raise SystemExit("Import backtest() and provide the local NIFTY OHLC dataset.")
