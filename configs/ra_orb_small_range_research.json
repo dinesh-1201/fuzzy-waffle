@@ -1,0 +1,16 @@
+{
+  "strategy": "RA_ORB_SMALL_RANGE_RESEARCH",
+  "opening_bars": 3,
+  "confirmation_closes": 4,
+  "max_gap_pct": null,
+  "max_opening_range_pct": 0.2497,
+  "stop_pct": 0.6,
+  "target_r": 3.0,
+  "entry_start": "09:30",
+  "last_entry": "11:00",
+  "exit_time": "15:25",
+  "worst_case_ambiguous_bar": true,
+  "one_trade_per_day": true,
+  "weekday_filter": null,
+  "status": "research_candidate_not_frozen"
+}
