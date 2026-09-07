@@ -15,16 +15,16 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class OptionBacktestConfig:
-    option_type: str = "AUTO"  # AUTO follows the NIFTY signal direction: CE up, PE down
-    strike_offset: int = 0      # 0=nearest ATM, +1/-1=one strike away, etc.
-    expiry_rank: int = 0        # 0=nearest eligible expiry
+    option_type: str = "AUTO"
+    strike_offset: int = 0
+    expiry_rank: int = 0
     premium_stop_pct: Optional[float] = None
     premium_target_pct: Optional[float] = None
     max_hold_minutes: Optional[int] = None
     exit_at_signal_exit: bool = True
     lot_size: int = 1
     round_trip_slippage_pct: float = 0.0
-    quote_mode: str = "strict"  # strict=first quote at/after time; legacy=latest at/before
+    quote_mode: str = "strict"
     max_entry_staleness_minutes: int = 2
     max_exit_staleness_minutes: int = 5
     worst_case_ambiguous_bar: bool = True
@@ -57,10 +57,7 @@ def normalize_option_columns(df: pd.DataFrame) -> pd.DataFrame:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
     if "OptionType" in out.columns:
-        out["OptionType"] = (
-            out["OptionType"].astype(str).str.upper().str.strip()
-            .replace({"CALL": "CE", "PUT": "PE"})
-        )
+        out["OptionType"] = out["OptionType"].astype(str).str.upper().str.strip().replace({"CALL": "CE", "PUT": "PE"})
     if "Expiry" in out.columns:
         out["Expiry"] = pd.to_datetime(out["Expiry"], errors="coerce").dt.normalize()
     return out.sort_values("Datetime").reset_index(drop=True)
@@ -82,22 +79,11 @@ def infer_strike_step(strikes: Iterable[float]) -> float:
 
 def _contract_pool(options: pd.DataFrame, signal_time: pd.Timestamp, option_type: str) -> pd.DataFrame:
     t = pd.Timestamp(signal_time)
-    return options[
-        (options["Datetime"] <= t)
-        & (options["Expiry"] >= t.normalize())
-        & (options["OptionType"] == option_type.upper())
-    ].copy()
+    return options[(options["Datetime"] <= t) & (options["Expiry"] >= t.normalize()) & (options["OptionType"] == option_type.upper())].copy()
 
 
-def select_contract(
-    options: pd.DataFrame,
-    signal_time: pd.Timestamp,
-    spot: float,
-    option_type: str,
-    strike_offset: int = 0,
-    expiry_rank: int = 0,
-) -> dict:
-    """Choose an expiry and strike using only contracts visible by signal_time."""
+def select_contract(options: pd.DataFrame, signal_time: pd.Timestamp, spot: float, option_type: str, strike_offset: int = 0, expiry_rank: int = 0) -> dict:
+    """Choose expiry and strike using only contracts visible by signal_time."""
     required = {"Datetime", "Strike", "Expiry", "OptionType"}
     missing = required - set(options.columns)
     if missing:
@@ -115,29 +101,14 @@ def select_contract(
     atm = float(strikes[np.argmin(np.abs(strikes - float(spot)))])
     target = atm + int(strike_offset) * step
     strike = float(strikes[np.argmin(np.abs(strikes - target))])
-    candidates = live[live["Strike"] == strike].sort_values("Datetime")
-    row = candidates.iloc[-1]
-    return {
-        "Symbol": row.get("Symbol", None), "OptionType": option_type.upper(),
-        "Strike": strike, "Expiry": expiry, "ATMStrike": atm,
-        "StrikeStep": step, "SelectedAt": pd.Timestamp(signal_time),
-    }
+    row = live[live["Strike"] == strike].sort_values("Datetime").iloc[-1]
+    return {"Symbol": row.get("Symbol", None), "OptionType": option_type.upper(), "Strike": strike, "Expiry": expiry, "ATMStrike": atm, "StrikeStep": step, "SelectedAt": pd.Timestamp(signal_time)}
 
 
-def get_quote(
-    contract: dict,
-    options: pd.DataFrame,
-    execution_time: pd.Timestamp,
-    mode: str = "strict",
-    max_staleness_minutes: Optional[int] = None,
-) -> tuple[pd.Series, float]:
-    """Return a quote and its time distance from execution_time."""
+def get_quote(contract: dict, options: pd.DataFrame, execution_time: pd.Timestamp, mode: str = "strict", max_staleness_minutes: Optional[int] = None) -> tuple[pd.Series, float]:
+    """Return the first quote at/after time in strict mode, or latest before it in legacy mode."""
     t = pd.Timestamp(execution_time)
-    rows = options[
-        (options["Strike"] == float(contract["Strike"]))
-        & (options["Expiry"] == pd.Timestamp(contract["Expiry"]))
-        & (options["OptionType"] == contract["OptionType"])
-    ].sort_values("Datetime")
+    rows = options[(options["Strike"] == float(contract["Strike"])) & (options["Expiry"] == pd.Timestamp(contract["Expiry"])) & (options["OptionType"] == contract["OptionType"])].sort_values("Datetime")
     if rows.empty:
         raise ValueError("No quote data exists for the selected contract.")
     if mode == "strict":
@@ -191,12 +162,7 @@ def summarize_option_trades(trades: pd.DataFrame) -> dict:
     pnl = pd.to_numeric(trades["PnL"], errors="coerce").dropna()
     gross_profit = pnl[pnl > 0].sum()
     gross_loss = -pnl[pnl < 0].sum()
-    return {
-        "trades": int(len(pnl)), "win_rate": float((pnl > 0).mean()),
-        "profit_factor": float(gross_profit / gross_loss) if gross_loss > 0 else np.inf,
-        "total_pnl": float(pnl.sum()), "avg_pnl": float(pnl.mean()),
-        "median_pnl": float(pnl.median()), "max_drawdown": _max_drawdown(pnl),
-    }
+    return {"trades": int(len(pnl)), "win_rate": float((pnl > 0).mean()), "profit_factor": float(gross_profit / gross_loss) if gross_loss > 0 else np.inf, "total_pnl": float(pnl.sum()), "avg_pnl": float(pnl.mean()), "median_pnl": float(pnl.median()), "max_drawdown": _max_drawdown(pnl)}
 
 
 def _signal_direction(row: pd.Series) -> int:
@@ -214,29 +180,17 @@ def _signal_value(row: pd.Series, names: tuple[str, ...]) -> object:
 
 
 def _option_path(options: pd.DataFrame, contract: dict, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
-    return options[
-        (options["Strike"] == float(contract["Strike"]))
-        & (options["Expiry"] == pd.Timestamp(contract["Expiry"]))
-        & (options["OptionType"] == contract["OptionType"])
-        & (options["Datetime"] >= pd.Timestamp(start))
-        & (options["Datetime"] <= pd.Timestamp(end))
-    ].sort_values("Datetime").copy()
+    # Start strictly after the entry quote: the entry bar must not also trigger an exit.
+    return options[(options["Strike"] == float(contract["Strike"])) & (options["Expiry"] == pd.Timestamp(contract["Expiry"])) & (options["OptionType"] == contract["OptionType"]) & (options["Datetime"] > pd.Timestamp(start)) & (options["Datetime"] <= pd.Timestamp(end))].sort_values("Datetime").copy()
 
 
-def _find_premium_exit(
-    path: pd.DataFrame,
-    entry_price: float,
-    cfg: OptionBacktestConfig,
-    signal_exit: pd.Timestamp,
-) -> tuple[pd.Series | None, str]:
-    """Find premium stop/target; returns option bar and reason."""
+def _find_premium_exit(path: pd.DataFrame, entry_price: float, cfg: OptionBacktestConfig) -> tuple[pd.Series | None, str]:
     if path.empty:
         return None, "NO_PATH"
     stop = None if cfg.premium_stop_pct is None else entry_price * (1.0 - cfg.premium_stop_pct / 100.0)
     target = None if cfg.premium_target_pct is None else entry_price * (1.0 + cfg.premium_target_pct / 100.0)
     for _, bar in path.iterrows():
-        hi = float(bar["High"])
-        lo = float(bar["Low"])
+        hi, lo = float(bar["High"]), float(bar["Low"])
         hit_stop = stop is not None and lo <= stop
         hit_target = target is not None and hi >= target
         if hit_stop and hit_target:
@@ -248,17 +202,8 @@ def _find_premium_exit(
     return None, ""
 
 
-def backtest_options(
-    signal_trades: pd.DataFrame,
-    options: pd.DataFrame,
-    cfg: OptionBacktestConfig = OptionBacktestConfig(),
-) -> pd.DataFrame:
-    """Convert completed NIFTY signals into realistic long-option trades.
-
-    Signal entry/exit times come from the underlying NIFTY backtest. The option
-    is bought after the signal, then sold on a premium stop/target, the NIFTY
-    signal exit, or the configured maximum holding time.
-    """
+def backtest_options(signal_trades: pd.DataFrame, options: pd.DataFrame, cfg: OptionBacktestConfig = OptionBacktestConfig()) -> pd.DataFrame:
+    """Convert completed NIFTY signals into long-option trades."""
     options = normalize_option_columns(options)
     missing = validate_option_schema(options)
     if missing:
@@ -266,7 +211,6 @@ def backtest_options(
     if signal_trades.empty:
         return pd.DataFrame()
     rows: list[dict] = []
-
     for _, signal in signal_trades.sort_values("EntryTime").iterrows():
         entry_time = pd.Timestamp(_signal_value(signal, ("EntryTime", "entry_time")))
         signal_exit = pd.Timestamp(_signal_value(signal, ("ExitTime", "exit_time")))
@@ -277,77 +221,40 @@ def backtest_options(
             option_type = "CE" if direction > 0 else "PE"
         if option_type not in {"CE", "PE"}:
             raise ValueError("option_type must be AUTO, CE or PE")
-
         try:
-            contract = select_contract(
-                options, entry_time, spot, option_type,
-                strike_offset=cfg.strike_offset, expiry_rank=cfg.expiry_rank,
-            )
-            entry_row, entry_stale = get_quote(
-                contract, options, entry_time, cfg.quote_mode, cfg.max_entry_staleness_minutes,
-            )
+            contract = select_contract(options, entry_time, spot, option_type, cfg.strike_offset, cfg.expiry_rank)
+            entry_row, entry_stale = get_quote(options=options, contract=contract, execution_time=entry_time, mode=cfg.quote_mode, max_staleness_minutes=cfg.max_entry_staleness_minutes)
         except ValueError as exc:
-            rows.append({
-                "SignalEntryTime": entry_time, "SignalExitTime": signal_exit,
-                "Direction": direction, "OptionType": option_type,
-                "Status": "SKIPPED", "SkipReason": str(exc),
-            })
+            rows.append({"SignalEntryTime": entry_time, "SignalExitTime": signal_exit, "Direction": direction, "OptionType": option_type, "Status": "SKIPPED", "SkipReason": str(exc)})
             continue
-
         entry_raw = execution_price(entry_row, "buy")
         entry_price = apply_slippage(entry_raw, "buy", cfg.round_trip_slippage_pct)
-        hold_end = signal_exit if cfg.exit_at_signal_exit else entry_time + pd.Timedelta(minutes=cfg.max_hold_minutes or 10**6)
+        hold_end = signal_exit
         if cfg.max_hold_minutes is not None:
             hold_end = min(hold_end, entry_time + pd.Timedelta(minutes=cfg.max_hold_minutes))
-
         path = _option_path(options, contract, entry_row["Datetime"], hold_end)
-        premium_bar, premium_reason = _find_premium_exit(path, entry_price, cfg, signal_exit)
-
+        premium_bar, premium_reason = _find_premium_exit(path, entry_price, cfg)
         if premium_bar is not None:
             exit_time_requested = pd.Timestamp(premium_bar["Datetime"])
-            exit_row = premium_bar
-            reason = premium_reason
-            exit_raw = float(entry_price * (1.0 - cfg.premium_stop_pct / 100.0) if premium_reason == "PREMIUM_SL" else entry_price * (1.0 + cfg.premium_target_pct / 100.0))
             exit_stale = 0.0
-        else:
-            if hold_end < signal_exit:
-                exit_time_requested = hold_end
+            reason = premium_reason
+            if premium_reason == "PREMIUM_SL":
+                exit_raw = entry_price * (1.0 - cfg.premium_stop_pct / 100.0)
             else:
-                exit_time_requested = signal_exit
+                exit_raw = entry_price * (1.0 + cfg.premium_target_pct / 100.0)
+        else:
+            exit_time_requested = hold_end
             try:
-                exit_row, exit_stale = get_quote(
-                    contract, options, exit_time_requested, cfg.quote_mode,
-                    cfg.max_exit_staleness_minutes,
-                )
+                exit_row, exit_stale = get_quote(options=options, contract=contract, execution_time=exit_time_requested, mode=cfg.quote_mode, max_staleness_minutes=cfg.max_exit_staleness_minutes)
             except ValueError as exc:
-                rows.append({
-                    "SignalEntryTime": entry_time, "SignalExitTime": signal_exit,
-                    "Direction": direction, "OptionType": option_type,
-                    "Strike": contract["Strike"], "Expiry": contract["Expiry"],
-                    "Status": "SKIPPED", "SkipReason": f"Exit: {exc}",
-                    "EntryTime": entry_row["Datetime"], "EntryPrice": entry_price,
-                    "EntryStalenessMin": entry_stale,
-                })
+                rows.append({"SignalEntryTime": entry_time, "SignalExitTime": signal_exit, "Direction": direction, "OptionType": option_type, "Strike": contract["Strike"], "Expiry": contract["Expiry"], "Status": "SKIPPED", "SkipReason": f"Exit: {exc}", "EntryTime": entry_row["Datetime"], "EntryPrice": entry_price, "EntryStalenessMin": entry_stale})
                 continue
             exit_time_requested = pd.Timestamp(exit_row["Datetime"])
             exit_raw = execution_price(exit_row, "sell")
-            reason = "SIGNAL_EXIT" if exit_time_requested == signal_exit else "MAX_HOLD"
-
+            reason = "SIGNAL_EXIT" if hold_end == signal_exit else "MAX_HOLD"
         exit_price = apply_slippage(exit_raw, "sell", cfg.round_trip_slippage_pct)
-        pnl_per_unit = exit_price - entry_price
-        pnl = pnl_per_unit * cfg.lot_size
-        rows.append({
-            "SignalEntryTime": entry_time, "SignalExitTime": signal_exit,
-            "EntryTime": pd.Timestamp(entry_row["Datetime"]), "ExitTime": exit_time_requested,
-            "Direction": direction, "OptionType": option_type,
-            "Strike": contract["Strike"], "ATMStrike": contract["ATMStrike"],
-            "StrikeOffset": cfg.strike_offset, "Expiry": contract["Expiry"],
-            "DTE": (pd.Timestamp(contract["Expiry"]) - entry_time.normalize()).days,
-            "EntryPrice": entry_price, "ExitPrice": exit_price,
-            "EntryStalenessMin": entry_stale, "ExitStalenessMin": exit_stale,
-            "PnL": pnl, "ReturnPct": premium_return(entry_price, exit_price) * 100.0,
-            "ExitReason": reason, "Status": "TRADE", "SkipReason": "",
-        })
+        pnl = (exit_price - entry_price) * cfg.lot_size
+        rows.append({"SignalEntryTime": entry_time, "SignalExitTime": signal_exit, "EntryTime": pd.Timestamp(entry_row["Datetime"]), "ExitTime": exit_time_requested, "Direction": direction, "OptionType": option_type, "Strike": contract["Strike"], "ATMStrike": contract["ATMStrike"], "StrikeOffset": cfg.strike_offset, "Expiry": contract["Expiry"], "DTE": (pd.Timestamp(contract["Expiry"]) - entry_time.normalize()).days, "EntryPrice": entry_price, "ExitPrice": exit_price, "EntryStalenessMin": entry_stale, "ExitStalenessMin": exit_stale, "PnL": pnl, "ReturnPct": premium_return(entry_price, exit_price) * 100.0, "ExitReason": reason, "Status": "TRADE", "SkipReason": ""})
     return pd.DataFrame(rows)
 
 
@@ -359,12 +266,4 @@ def option_data_quality_report(options: pd.DataFrame) -> dict:
     duplicate_keys = df.duplicated(["Datetime", "Strike", "Expiry", "OptionType"]).sum()
     bad_ohlc = ((df["High"] < df["Low"]) | (df["High"] < df["Close"]) | (df["Low"] > df["Close"])).sum()
     zero_close = (df["Close"] <= 0).sum()
-    return {
-        "ok": bool(duplicate_keys == 0 and bad_ohlc == 0 and zero_close == 0),
-        "rows": int(len(df)), "start": df["Datetime"].min(), "end": df["Datetime"].max(),
-        "contracts": int(df[["Strike", "Expiry", "OptionType"]].drop_duplicates().shape[0]),
-        "duplicate_contract_bars": int(duplicate_keys), "bad_ohlc_rows": int(bad_ohlc),
-        "nonpositive_close_rows": int(zero_close), "has_bid_ask": bool({"Bid", "Ask"}.issubset(df.columns)),
-        "has_iv": bool("IV" in df.columns), "has_oi": bool("OI" in df.columns),
-        "has_volume": bool("Volume" in df.columns),
-    }
+    return {"ok": bool(duplicate_keys == 0 and bad_ohlc == 0 and zero_close == 0), "rows": int(len(df)), "start": df["Datetime"].min(), "end": df["Datetime"].max(), "contracts": int(df[["Strike", "Expiry", "OptionType"]].drop_duplicates().shape[0]), "duplicate_contract_bars": int(duplicate_keys), "bad_ohlc_rows": int(bad_ohlc), "nonpositive_close_rows": int(zero_close), "has_bid_ask": bool({"Bid", "Ask"}.issubset(df.columns)), "has_iv": bool("IV" in df.columns), "has_oi": bool("OI" in df.columns), "has_volume": bool("Volume" in df.columns)}
