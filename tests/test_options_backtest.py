@@ -2,6 +2,8 @@ import pandas as pd
 import pytest
 
 from src.options_backtest import (
+    OptionBacktestConfig,
+    backtest_options,
     get_quote,
     infer_strike_step,
     normalize_option_columns,
@@ -13,7 +15,7 @@ def sample_options():
     rows = []
     for strike in (100, 150, 200):
         for typ in ("CE", "PE"):
-            for tm, close in (("09:29", 10.0), ("09:30", 11.0), ("09:31", 12.0)):
+            for tm, close in (("09:29", 10.0), ("09:30", 11.0), ("09:31", 12.0), ("09:35", 15.0)):
                 rows.append({
                     "Datetime": pd.Timestamp(f"2020-01-02 {tm}"),
                     "Open": close, "High": close + 1, "Low": close - 1, "Close": close,
@@ -59,3 +61,39 @@ def test_normalize_common_columns():
     assert out.loc[0, "OptionType"] == "CE"
     assert out.loc[0, "Strike"] == 150
     assert out.loc[0, "Datetime"] == pd.Timestamp("2020-01-02 09:30")
+
+
+def test_full_signal_to_option_trade():
+    options = sample_options()
+    signals = pd.DataFrame([{
+        "SessionDate": pd.Timestamp("2020-01-02").date(),
+        "EntryTime": pd.Timestamp("2020-01-02 09:30"),
+        "ExitTime": pd.Timestamp("2020-01-02 09:35"),
+        "Direction": 1,
+        "Entry": 151.0,
+    }])
+    trades = backtest_options(signals, options, OptionBacktestConfig(option_type="AUTO"))
+    assert len(trades) == 1
+    assert trades.loc[0, "Status"] == "TRADE"
+    assert trades.loc[0, "OptionType"] == "CE"
+    assert trades.loc[0, "Strike"] == 150
+    assert trades.loc[0, "EntryPrice"] == pytest.approx(12.0)
+    assert trades.loc[0, "ExitPrice"] == pytest.approx(15.0)
+    assert trades.loc[0, "PnL"] == pytest.approx(3.0)
+
+
+def test_premium_stop_is_applied_before_signal_exit():
+    options = sample_options()
+    options.loc[(options["OptionType"] == "CE") & (options["Strike"] == 150) & (options["Datetime"] == pd.Timestamp("2020-01-02 09:31")), "Low"] = 5.0
+    signals = pd.DataFrame([{
+        "EntryTime": pd.Timestamp("2020-01-02 09:30"),
+        "ExitTime": pd.Timestamp("2020-01-02 09:35"),
+        "Direction": 1,
+        "Entry": 151.0,
+    }])
+    trades = backtest_options(
+        signals, options,
+        OptionBacktestConfig(option_type="CE", premium_stop_pct=10.0),
+    )
+    assert trades.loc[0, "ExitReason"] == "PREMIUM_SL"
+    assert trades.loc[0, "ExitPrice"] == pytest.approx(10.8)
