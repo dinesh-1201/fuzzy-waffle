@@ -77,14 +77,19 @@ def test_full_signal_to_option_trade():
     assert trades.loc[0, "Status"] == "TRADE"
     assert trades.loc[0, "OptionType"] == "CE"
     assert trades.loc[0, "Strike"] == 150
-    assert trades.loc[0, "EntryPrice"] == pytest.approx(12.0)
+    assert trades.loc[0, "EntryPrice"] == pytest.approx(11.0)
     assert trades.loc[0, "ExitPrice"] == pytest.approx(15.0)
-    assert trades.loc[0, "PnL"] == pytest.approx(3.0)
+    assert trades.loc[0, "PnL"] == pytest.approx(4.0)
 
 
 def test_premium_stop_is_applied_before_signal_exit():
     options = sample_options()
-    options.loc[(options["OptionType"] == "CE") & (options["Strike"] == 150) & (options["Datetime"] == pd.Timestamp("2020-01-02 09:31")), "Low"] = 5.0
+    mask = (
+        (options["OptionType"] == "CE")
+        & (options["Strike"] == 150)
+        & (options["Datetime"] == pd.Timestamp("2020-01-02 09:31"))
+    )
+    options.loc[mask, "Low"] = 5.0
     signals = pd.DataFrame([{
         "EntryTime": pd.Timestamp("2020-01-02 09:30"),
         "ExitTime": pd.Timestamp("2020-01-02 09:35"),
@@ -96,4 +101,4 @@ def test_premium_stop_is_applied_before_signal_exit():
         OptionBacktestConfig(option_type="CE", premium_stop_pct=10.0),
     )
     assert trades.loc[0, "ExitReason"] == "PREMIUM_SL"
-    assert trades.loc[0, "ExitPrice"] == pytest.approx(10.8)
+    assert trades.loc[0, "ExitPrice"] == pytest.approx(9.9)
