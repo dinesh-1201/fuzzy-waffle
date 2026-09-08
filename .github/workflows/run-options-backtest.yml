@@ -1,0 +1,54 @@
+name: Run historical NIFTY option backtest
+
+on:
+  workflow_dispatch:
+    inputs:
+      nifty_path:
+        description: "Path to NIFTY 5-minute Excel in the runner"
+        required: true
+        default: "data/NIFTY_5min_CLEANED_2015_2026.xlsx"
+      options_glob:
+        description: "Space-separated option ZIP paths in the runner"
+        required: true
+        default: "data/NiftyOptions 2017.zip data/NiftyOptions 2018.zip data/NiftyOptions 2019.zip data/NiftyOptions 2020.zip"
+
+jobs:
+  backtest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pandas numpy openpyxl
+
+      - name: Check data files
+        shell: bash
+        run: |
+          echo "NIFTY file: ${{ inputs.nifty_path }}"
+          test -f "${{ inputs.nifty_path }}"
+          for f in ${{ inputs.options_glob }}; do
+            echo "Option archive: $f"
+            test -f "$f"
+          done
+
+      - name: Run backtest
+        shell: bash
+        run: |
+          python scripts/run_options_backtest.py \
+            --nifty "${{ inputs.nifty_path }}" \
+            --options ${{ inputs.options_glob }} \
+            --start 2017-01-01 \
+            --end 2020-12-31 \
+            --output results/options_backtest
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: nifty-options-backtest-results
+          path: results/options_backtest/
